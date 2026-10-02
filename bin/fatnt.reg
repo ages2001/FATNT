@@ -1,0 +1,8 @@
+REGEDIT4
+
+[HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\fatnt]
+"Type"=dword:00000002
+"Start"=dword:00000001
+"ErrorControl"=dword:00000001
+"Group"="File System"
+"EnableWriteSupport"=dword:00000001

@@ -1,0 +1,1 @@
+/* Everything the tests need is in ntifs.h */
