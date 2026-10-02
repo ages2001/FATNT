@@ -1,0 +1,47 @@
+# Line endings for FATNT
+#
+# Text is stored with LF inside the repository and always checked out with
+# CRLF, on every host (Linux included) and in GitHub "Download ZIP"
+# archives. The NT/DDK tools (NMAKE, BUILD) need CRLF, so the tree can be
+# copied straight into the build guest.
+
+# Default for everything Git detects as text
+* text=auto eol=crlf
+
+# Sources
+*.c        text eol=crlf diff=cpp
+*.h        text eol=crlf diff=cpp
+*.C        text eol=crlf diff=cpp
+*.H        text eol=crlf diff=cpp
+*.py       text eol=crlf diff=python
+
+# Build files (NT: build.bat; 2KXP: sources, makefile, exfatnt.rc)
+*.bat      text eol=crlf
+*.BAT      text eol=crlf
+makefile   text eol=crlf
+MAKEFILE   text eol=crlf
+sources    text eol=crlf
+SOURCES    text eol=crlf
+*.rc       text eol=crlf
+
+# Install files (bin\)
+*.reg      text eol=crlf
+*.REG      text eol=crlf
+*.inf      text eol=crlf
+*.INF      text eol=crlf
+
+# Documentation
+*.md       text eol=crlf
+*.txt      text eol=crlf
+LICENSE    text eol=crlf
+
+# Build output and archives: never touch
+*.sys      binary
+*.SYS      binary
+*.obj      binary
+*.pdb      binary
+*.res      binary
+*.exe      binary
+*.zip      binary
+*.ZIP      binary
+*.img      binary
