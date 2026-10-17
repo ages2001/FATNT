@@ -360,6 +360,7 @@ int main(int argc, char **argv)
     if (argc < 3) { fprintf(stderr, "usage: %s <image> <label>\n", argv[0]); return 2; }
     reg.Buffer = regbuf; reg.Length = sizeof(regbuf) - sizeof(WCHAR); reg.MaximumLength = sizeof(regbuf);
 
+    if (getenv("FATNT_SECTOR")) g_sector = (ULONG)atoi(getenv("FATNT_SECTOR"));
     TS(DriverEntry(&g_fsdrv, &reg), STATUS_SUCCESS);
     SetupDisk(argv[1]);
     RunOne(argv[2]);

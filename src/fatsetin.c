@@ -71,6 +71,11 @@ FatShrinkFileSize (
 
         if (Fcb->SectionObjectPointers.SharedCacheMap != NULL) {
             CcSetFileSizes(FileObject, (PCC_FILE_SIZES)&Fcb->Header.AllocationSize);
+        } else if (Fcb->SectionObjectPointers.DataSectionObject != NULL) {
+            /* mapped but not cached: drop the pages past the new end */
+            LARGE_INTEGER From;
+            From.QuadPart = (NewSize + FAT_PAGE_SIZE - 1) & ~(LONGLONG)(FAT_PAGE_SIZE - 1);
+            (VOID)CcPurgeCacheSection(&Fcb->SectionObjectPointers, &From, 0, FALSE);
         }
 
     } __finally {
@@ -117,19 +122,15 @@ FatSetFileSize (
 
     __try {
 
-        /* A mapped file with no cache map still has to hear of the size */
-        if (Fcb->SectionObjectPointers.DataSectionObject != NULL &&
-            Fcb->SectionObjectPointers.SharedCacheMap == NULL &&
-            !(FileObject->Flags & FO_CLEANUP_COMPLETE)) {
-
-            CcInitializeCacheMap(FileObject,
-                                 (PCC_FILE_SIZES)&Fcb->Header.AllocationSize,
-                                 FALSE,
-                                 &FatData.CacheManagerCallbacks,
-                                 Fcb);
-
-            CacheMapInitialized = TRUE;
-        }
+        /*
+         * A file mapped by Mm but without a cache map used to get a temporary
+         * cache map here so CcSetFileSizes could tell Mm the new size. With the
+         * volume and the file held exclusive that deadlocked: CcInitializeCacheMap
+         * waits for a previous cache map's teardown, and the teardown's flush
+         * needs the file (the W2K boot hang at "Preparing network connections").
+         * Mm only needs to drop the pages past a new, smaller end, and
+         * CcPurgeCacheSection does that without a cache map (FatShrinkFileSize).
+         */
 
         if (NewSize > Fcb->Header.FileSize.QuadPart) {
 
@@ -142,6 +143,15 @@ FatSetFileSize (
             }
 
             Fcb->Header.FileSize.QuadPart = NewSize;
+
+            /* A paging file is written directly by the Memory Manager, which
+             * never relies on the file system to zero past valid data. Treat the
+             * whole file as valid so a paging write never triggers a (huge,
+             * synchronous) zero-fill in the modified-page-writer context - that
+             * was the paging-file "freeze". */
+            if (Fcb->FcbState & FCB_STATE_PAGING_FILE) {
+                Fcb->Header.ValidDataLength.QuadPart = NewSize;
+            }
 
             if (Fcb->SectionObjectPointers.SharedCacheMap != NULL) {
                 CcSetFileSizes(FileObject, (PCC_FILE_SIZES)&Fcb->Header.AllocationSize);
@@ -632,6 +642,13 @@ FatCommonSetInformation (
     BOOLEAN FcbAcquired = FALSE;
     NTSTATUS Status;
 
+    /* The lazy writer reporting what reached the disk (possibly through a file
+     * object whose handle is already closed, so with no CCB): the entry set is
+     * rewritten at cleanup and close anyway */
+    if (Class == FileEndOfFileInformation && IrpSp->Parameters.SetFile.AdvanceOnly) {
+        return STATUS_SUCCESS;
+    }
+
     if (Fcb == NULL || Ccb == NULL) {
         return STATUS_INVALID_PARAMETER;
     }
@@ -692,10 +709,16 @@ FatCommonSetInformation (
             __leave;
         }
 
-        /* A paging file in use must not be deleted, renamed or resized */
+        /*
+         * A paging file in use must not be deleted or renamed, but the Memory
+         * Manager DOES size it (FileAllocationInformation / FileEndOfFileInformation)
+         * when it sets the paging file up and when it grows it - those must be
+         * allowed, or Mm reports "no properly sized paging file" and runs with
+         * almost no virtual memory. (Truncation at open is already prevented by
+         * forcing FILE_OPEN for paging opens in fatcreat.c.)
+         */
         if ((Fcb->FcbState & FCB_STATE_PAGING_FILE) &&
-            (Class == FileDispositionInformation || Class == FileRenameInformation ||
-             Class == FileAllocationInformation || Class == FileEndOfFileInformation)) {
+            (Class == FileDispositionInformation || Class == FileRenameInformation)) {
 
             Status = STATUS_ACCESS_DENIED;
             __leave;

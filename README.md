@@ -15,6 +15,9 @@ boot file system all the way down to NT 3.1.
 
 ## Status
 
+**Version 1.2** - read/write, boot and paging file on Windows NT 3.1 - 4.0.
+See [changelog.txt](changelog.txt) for what changed.
+
 Files and directories can be created, written, extended, truncated, renamed,
 moved and deleted; attributes, times and the volume label can be changed.
 Memory-mapped writes, the fast I/O write path and write-through work. Writing
@@ -26,17 +29,17 @@ boot/system file system, standing in for `Fastfat.sys`, on real installs of each
 FAT16 system volume, passes the boot-time check, loads the boot and system
 drivers, reaches the graphical logon and desktop, and serves ordinary file
 read/write from a command prompt - a complete boot driven entirely by FATNT.
-Paging-file opens (`SL_OPEN_PAGING_FILE`) are supported; the Memory Manager
-requires the paging file to be reasonably contiguous, which is how Windows lays
-one out (a heavily fragmented test paging file is reported as not properly
-sized - that is the disk, not the driver).
+**A paging file can live on a FAT volume.** The Memory Manager creates and sizes
+`pagefile.sys` there, grows it under memory pressure, and an existing paging
+file is opened as it is, never truncated - see *Windows NT 3.1 - 4.0 notes*.
 
 A FAT, read/write, boot-capable IFS must get a number of version-specific
 details right that only surface on the real kernel; the ones that mattered are
 called out under *Windows NT 3.1 - 4.0 notes* below.
 
-Three tools come with it: `fatfmt.exe` formats a volume, `fatchk.exe` checks
-and repairs one, and (planned) `fatachk.exe` does the boot-time check.
+Three programs come with it: `fatinst.exe` installs the driver, `fatfmt.exe`
+formats a volume and `fatchk.exe` checks and repairs one. There is no
+boot-time (`autochk`-style) check yet.
 
 ## Features
 
@@ -46,8 +49,8 @@ and repairs one, and (planned) `fatachk.exe` does the boot-time check.
   - Second reserved entry's clean-shutdown bit (FAT16/32) set and cleared like
     Windows; a volume left dirty stays marked for the check tool
   - All FAT copies kept in step; the FAT32 FSInfo free count is maintained
-  - 512 to 4096-byte sectors, every power-of-two cluster size to 32 KB,
-    files up to 4 GB - 1
+  - 512 to 4096-byte sectors, every power-of-two cluster size from 512 bytes
+    to 64 KB (a 4 GB FAT16 volume uses 64 KB clusters), files up to 4 GB - 1
 - **8.3 and long (VFAT) names**
   - Long-name entry sets read and written, with checksums and `~N` numeric
     tails generated for lossy or long names
@@ -64,11 +67,16 @@ and repairs one, and (planned) `fatachk.exe` does the boot-time check.
     the root does not
   - Set information: basic, disposition, rename/move (with replace),
     allocation, end of file
-  - Change notification, byte-range locks, share access, delete-on-close
+  - Byte-range locks, share access, delete-on-close (directory change
+    notification: live on a single-version build; on the universal NT 3.1 - 4.0
+    binary the request is held pending rather than delivered - see the notes)
   - `FSCTL_IS_VOLUME_DIRTY`, `FSCTL_MARK_VOLUME_DIRTY`, flush of files and of
     the whole volume
   - Volume lock/unlock/dismount, media change verification, removable and
-    hot-plug write-back
+    hot-plug write-back; a volume formatted over by another file system while
+    files were still open on it is let go, so the new file system mounts
+  - Paging files: created, sized and grown by the Memory Manager; a paging file
+    in use cannot be deleted or renamed
 - **Single source tree**, built with `FAT_NT4` (and `FAT_CROSS` for the GCC
   cross build) into **one** `fatnt.sys` that loads and boots on NT 3.1, 3.5,
   3.51 and 4.0 (x86) - no per-version binary. It binds the executive-resource
@@ -226,6 +234,40 @@ once the driver runs for real. The ones that mattered:
   larger one. Every embedded `ERESOURCE` is padded (`FAT_ERESOURCE_PAD`) so it
   cannot run past its field into the next; the same applies to `FILE_LOCK`.
   Harmless on NT 3.5+.
+- **The Memory Manager sizes the paging file.** A paging file in use must not be
+  deleted or renamed, but Mm *does* set its size (`FileEndOfFileInformation`,
+  `FileAllocationInformation`) when it sets the paging file up and when it grows
+  it. The driver must allow those on the paging-file FCB; refusing them makes Mm
+  report "no properly sized paging file" and run with almost no virtual memory,
+  which also starves everything else (directory listings fail for lack of pool,
+  the shell crawls). Only delete and rename are refused; truncation at open is
+  prevented separately by forcing `FILE_OPEN` for paging opens.
+- **No synchronous zero-fill for the paging file.** FAT has no valid-data
+  length on disk, so ordinary files get the clusters past their last written
+  byte zeroed before a larger size is recorded. Doing that for the paging file
+  meant a huge zero-fill inside the modified page writer when Mm grew the file
+  under memory pressure, and the system froze. A paging file is treated as
+  valid up to its full size: the Memory Manager never relies on the file
+  system to zero it.
+- **Resizing a memory-mapped file.** A file mapped by the Memory Manager but
+  without a cache map must not get a temporary cache map just to report a new
+  size: with the volume and the file held, `CcInitializeCacheMap` waits for the
+  old cache map's teardown, whose flush needs the file - a deadlock that showed
+  up on Windows 2000 as a boot hang at "Preparing network connections...". A
+  shrink purges the pages past the new end instead, which needs no cache map.
+  The lazy writer's valid-data-length report is accepted even when it comes
+  through a file object whose handle is already closed.
+- **Directory change notification.** The `FsRtlNotifyFull` package is NT 3.51+
+  only, and NT 3.1's older notify package needs a sync object NT 3.1 does not
+  export an initialiser for, so the one universal binary does not hand notify
+  requests to FsRtl. A notify request must still never be completed on the spot:
+  that makes the caller (File Manager, the shell) treat it as "something
+  changed", re-read and re-arm instantly, and spin - pinning the CPU and
+  freezing the shell. The driver instead holds each `IRP_MN_NOTIFY_CHANGE_DIRECTORY`
+  pending on the volume's notify list (with a cancel routine) and completes it
+  at handle cleanup. No live auto-refresh (press refresh to re-read), but no
+  spin or freeze. A Visual C++ build pinned to NT 3.51/4.0 (without `FAT_NT31`)
+  uses the real `FsRtlNotifyFull` package and delivers live notification.
 - **Dispatch table size.** `DRIVER_OBJECT.MajorFunction[]` is sized by the
   running kernel's `IRP_MJ_MAXIMUM_FUNCTION`, which on NT 3.1 is smaller than
   the headers' value, so `DriverEntry` fills it only up to `IRP_MJ_CLEANUP`.
@@ -310,7 +352,13 @@ fatchk drive: [/F] [/V]
 
 `fatfmt` lays out the boot sector (and the FAT32 backup and FSInfo), the FATs
 and an empty root directory, choosing the FAT type from the volume size unless
-`/FS:` forces it. `fatchk` checks the boot sector, the reserved FAT entries and
+`/FS:` forces it. `/A:` takes a cluster size in bytes or as `4K`, `64K` and so
+on; FAT16 clusters go up to 64 KB, so a 4 GB partition formats as FAT16 the
+way NT's own `FORMAT` does it. `fatfmt` also writes the hidden-sectors field
+and gives the partition the type that matches the new FAT (`01`, `04`, `06`;
+`0B`/`0C` for FAT32 on Windows 2000 and later - NT 3.1 - 4.0 only give drive
+letters to the older types, so there it is never moved away from them). Both
+tools run on NT 3.1 through 2000. `fatchk` checks the boot sector, the reserved FAT entries and
 clean-shutdown bit, every cluster chain (bad links, loops, over-long chains,
 cross-links), directory sizes, lost clusters and the free count; `/F` repairs.
 

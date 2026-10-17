@@ -571,6 +571,74 @@ FatQueryDirectory (
 /* IRP_MN_NOTIFY_CHANGE_DIRECTORY                                      */
 /* ------------------------------------------------------------------ */
 
+#ifdef FAT_NT31
+
+/*
+ * Change-notification support for the universal binary. NT 3.1 does not export
+ * the FsRtlNotifyFull API (and NT 3.51+'s is compiled out of this build), so a
+ * directory-change notify request cannot be handed to the FsRtl notify package.
+ * Completing it immediately is wrong: the caller (e.g. File Manager) treats the
+ * completion as "a change happened", re-reads the directory and re-arms the
+ * notify, which completes again at once - a tight spin that pins the CPU and
+ * freezes the shell. Instead the request is held pending on the volume's notify
+ * list and completed only when the handle is cleaned up (FatNotifyCleanupList,
+ * called from cleanup) or the request is cancelled. (Live notification is not
+ * delivered, but a manual refresh works and nothing spins.)
+ */
+static VOID NTAPI
+FatCancelNotifyIrp (
+    PDEVICE_OBJECT DeviceObject,
+    PIRP Irp
+    )
+{
+    (void)DeviceObject;
+
+    RemoveEntryList(&Irp->Tail.Overlay.ListEntry);
+    IoReleaseCancelSpinLock(Irp->CancelIrql);
+
+    Irp->IoStatus.Status = STATUS_CANCELLED;
+    Irp->IoStatus.Information = 0;
+    IoCompleteRequest(Irp, IO_NO_INCREMENT);
+}
+
+VOID
+FatNotifyCleanupList (
+    PFAT_VCB Vcb,
+    PFAT_CCB Ccb
+    )
+{
+    KIRQL Irql;
+    LIST_ENTRY Done;
+    PLIST_ENTRY Entry;
+
+    InitializeListHead(&Done);
+
+    IoAcquireCancelSpinLock(&Irql);
+    for (Entry = Vcb->DirNotifyList.Flink; Entry != &Vcb->DirNotifyList; ) {
+        PIRP Nirp = CONTAINING_RECORD(Entry, IRP, Tail.Overlay.ListEntry);
+        PLIST_ENTRY Next = Entry->Flink;
+        PIO_STACK_LOCATION Nsp = IoGetCurrentIrpStackLocation(Nirp);
+
+        if (Nsp->FileObject->FsContext2 == Ccb) {
+            Nirp->CancelRoutine = NULL;
+            RemoveEntryList(Entry);
+            InsertTailList(&Done, Entry);
+        }
+        Entry = Next;
+    }
+    IoReleaseCancelSpinLock(Irql);
+
+    while (!IsListEmpty(&Done)) {
+        PLIST_ENTRY E = RemoveHeadList(&Done);
+        PIRP Nirp = CONTAINING_RECORD(E, IRP, Tail.Overlay.ListEntry);
+        Nirp->IoStatus.Status = STATUS_NOTIFY_CLEANUP;
+        Nirp->IoStatus.Information = 0;
+        IoCompleteRequest(Nirp, IO_NO_INCREMENT);
+    }
+}
+
+#endif /* FAT_NT31 */
+
 static NTSTATUS
 FatNotifyChangeDirectory (
     PFAT_IRP_CONTEXT Ctx,
@@ -581,6 +649,10 @@ FatNotifyChangeDirectory (
     PFAT_VCB Vcb = Dcb->Vcb;
     PIO_STACK_LOCATION IrpSp = Ctx->IrpSp;
     NTSTATUS Status;
+#ifdef FAT_NT31
+    KIRQL Irql;
+    BOOLEAN Cancelled = FALSE;
+#endif
 
     (VOID)ExAcquireResourceExclusiveLite(&Vcb->Resource, TRUE);
 
@@ -591,15 +663,26 @@ FatNotifyChangeDirectory (
             __leave;
         }
 
+#ifdef FAT_NT31
+        /* Hold the request pending; never complete it on the spot (see above). */
+        IoMarkIrpPending(Ctx->Irp);
+        IoAcquireCancelSpinLock(&Irql);
+        if (Ctx->Irp->Cancel) {
+            IoReleaseCancelSpinLock(Irql);
+            Cancelled = TRUE;
+        } else {
+            InsertTailList(&Vcb->DirNotifyList, &Ctx->Irp->Tail.Overlay.ListEntry);
+            Ctx->Irp->CancelRoutine = FatCancelNotifyIrp;
+            IoReleaseCancelSpinLock(Irql);
+        }
+        Ctx->Flags |= FAT_CTX_NO_COMPLETE;
+        Status = STATUS_PENDING;
+#else
         Status = FatBuildFullName(Dcb);
         if (!NT_SUCCESS(Status)) {
             __leave;
         }
 
-#ifdef FAT_NT31
-        /* Change notification is not provided on NT 3.1 */
-        Status = STATUS_SUCCESS;
-#else
         FsRtlNotifyFullChangeDirectory(Vcb->NotifySync,
                                        &Vcb->DirNotifyList,
                                        Ccb,
@@ -619,6 +702,14 @@ FatNotifyChangeDirectory (
 
         FatRelease(&Vcb->Resource);
     }
+
+#ifdef FAT_NT31
+    if (Cancelled) {
+        Ctx->Irp->IoStatus.Status = STATUS_CANCELLED;
+        Ctx->Irp->IoStatus.Information = 0;
+        IoCompleteRequest(Ctx->Irp, IO_NO_INCREMENT);
+    }
+#endif
 
     return Status;
 }

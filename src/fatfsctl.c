@@ -463,6 +463,30 @@ FatMountVolume (
 /* Verify                                                              */
 /* ------------------------------------------------------------------ */
 
+/* Is the FAT volume this VCB had (serial, cluster count, FAT type) still on the disk? */
+BOOLEAN
+FatSameVolume (
+    PFAT_VCB Vcb
+    )
+{
+    PUCHAR Boot = (PUCHAR)ExAllocatePoolWithTag(NonPagedPool, Vcb->SectorSize, FAT_TAG_BUFFER);
+    FAT_GEOMETRY Geo;
+    BOOLEAN Same = FALSE;
+
+    if (Boot == NULL) {
+        return TRUE;            /* cannot tell: as before */
+    }
+    if (NT_SUCCESS(FatReadSectors(Vcb->TargetDeviceObject, 0, Vcb->SectorSize, Boot, TRUE)) &&
+        FatCheckBootSector(Boot, Vcb->SectorSize, 0, &Geo) == FAT_BOOT_OK &&
+        Geo.SerialNumber == Vcb->SerialNumber &&
+        Geo.ClusterCount == Vcb->ClusterCount &&
+        Geo.FatType == Vcb->FatType) {
+        Same = TRUE;
+    }
+    ExFreePool(Boot);
+    return Same;
+}
+
 static NTSTATUS
 FatVerifyVolume (
     PFAT_IRP_CONTEXT Ctx

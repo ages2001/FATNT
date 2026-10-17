@@ -28,7 +28,7 @@ if exist fatnt.sys del fatnt.sys
 cl -nologo -c -Gz -Ox -W3 -Zp8 -Zi -Zl -DFAT_NT4 -DFAT_NT31 -D_X86_=1 -Di386=1 -DSTD_CALL -DCONDITION_HANDLING=1 -DNT_UP=0 -DNT_INST=0 -DWIN32=100 -D_NT1X_=100 -DWINNT=1 -D_WIN32_WINNT=0x0400 -DDEVL=1 -DFPO=1 /I. /I.. ..\fatalloc.c ..\fatclose.c ..\fatcreat.c ..\fatdir.c ..\fatdirw.c ..\fatdisp.c ..\fatfast.c ..\fatflush.c ..\fatfsctl.c ..\fatinfo.c ..\fatinit.c ..\fatio.c ..\fatmisc.c ..\fatread.c ..\fatres.c ..\fatsetin.c ..\fatstruc.c ..\fatsup.c ..\fatvol.c ..\fatwrite.c
 if errorlevel 1 goto error
 
-link -nologo -release -debug -debugtype:both -subsystem:native,3.10 -entry:DriverEntry@8 -driver -base:0x10000 -align:0x200 -nodefaultlib -out:fatnt.sys fatalloc.obj fatclose.obj fatcreat.obj fatdir.obj fatdirw.obj fatdisp.obj fatfast.obj fatflush.obj fatfsctl.obj fatinfo.obj fatinit.obj fatio.obj fatmisc.obj fatread.obj fatres.obj fatsetin.obj fatstruc.obj fatsup.obj fatvol.obj fatwrite.obj libcntpr.lib ntoskrnl.lib hal.lib
+link -nologo -release -version:1.2 -debug -debugtype:both -subsystem:native,3.10 -entry:DriverEntry@8 -driver -base:0x10000 -align:0x200 -nodefaultlib -out:fatnt.sys fatalloc.obj fatclose.obj fatcreat.obj fatdir.obj fatdirw.obj fatdisp.obj fatfast.obj fatflush.obj fatfsctl.obj fatinfo.obj fatinit.obj fatio.obj fatmisc.obj fatread.obj fatres.obj fatsetin.obj fatstruc.obj fatsup.obj fatvol.obj fatwrite.obj libcntpr.lib ntoskrnl.lib hal.lib
 if errorlevel 1 goto error
 
 echo fatnt.sys built.

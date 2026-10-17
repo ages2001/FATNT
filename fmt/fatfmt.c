@@ -40,13 +40,16 @@ static int VolLock(VOL v) { DWORD n; return DeviceIoControl(v, FSCTL_LOCK_VOLUME
 static void VolDismount(VOL v) { DWORD n; DeviceIoControl(v, FSCTL_DISMOUNT_VOLUME, 0,0,0,0,&n,0); }
 static int VolWrite(VOL v, u64 off, const void *buf, u32 len) {
     LARGE_INTEGER li; DWORD done; li.QuadPart = off;
-    SetFilePointerEx(v, li, NULL, FILE_BEGIN);
+    SetFilePointer(v, (LONG)li.LowPart, &li.HighPart, FILE_BEGIN);   /* SetFilePointer, not SetFilePointerEx: NT 3.1 - 4.0 have only the former */
     return WriteFile(v, buf, len, &done, NULL) && done == len;
 }
 static u64 VolSize(VOL v) {
-    GET_LENGTH_INFORMATION gli; DWORD n;
+    GET_LENGTH_INFORMATION gli; PARTITION_INFORMATION pi; DWORD n;
     if (DeviceIoControl(v, IOCTL_DISK_GET_LENGTH_INFO, 0,0,&gli,sizeof(gli),&n,0))
         return gli.Length.QuadPart;
+    /* NT 3.1 - 2000 have no GET_LENGTH_INFO: the partition's length */
+    if (DeviceIoControl(v, IOCTL_DISK_GET_PARTITION_INFO, 0,0,&pi,sizeof(pi),&n,0))
+        return pi.PartitionLength.QuadPart;
     return 0;
 }
 static u32 VolSector(VOL v) {
@@ -56,6 +59,33 @@ static u32 VolSector(VOL v) {
     return 512;
 }
 static void VolClose(VOL v) { CloseHandle(v); }
+/* The partition's first sector (for the BPB hidden-sectors field) */
+static u32 VolHidden(VOL v) {
+    PARTITION_INFORMATION pi; DWORD n;
+    if (DeviceIoControl(v, IOCTL_DISK_GET_PARTITION_INFO, 0,0,&pi,sizeof(pi),&n,0))
+        return pi.HiddenSectors;
+    return 0;
+}
+/* Give the partition the type that matches the FAT just written, keeping the
+   LBA (0Eh/0Ch) form when the partition already used one. */
+static void VolSetType(VOL v, int fatType, u32 totalSec) {
+    PARTITION_INFORMATION pi; SET_PARTITION_INFORMATION sp; DWORD n; u8 want, cur;
+    if (!DeviceIoControl(v, IOCTL_DISK_GET_PARTITION_INFO, 0,0,&pi,sizeof(pi),&n,0)) return;
+    cur = pi.PartitionType;
+    if ((GetVersion() & 0x80000000) == 0 && (GetVersion() & 0xFF) < 5) {
+        /* NT 3.1 - 4.0 letter only the partition types they recognize (01, 04,
+           06, 07): never move a volume to 0B/0C/0E there, or it loses its drive
+           letter. Only correct FAT12/FAT16 within 01/04/06. */
+        if (fatType == 32 || (cur != 0x01 && cur != 0x04 && cur != 0x06)) return;
+        want = (fatType == 12) ? 0x01 : (totalSec < 65536 ? 0x04 : 0x06);
+    } else if (fatType == 12) want = 0x01;
+    else if (fatType == 16) want = (cur == 0x0E || cur == 0x0C) ? 0x0E : (totalSec < 65536 ? 0x04 : 0x06);
+    else                    want = (cur == 0x0C || cur == 0x0E || (u64)pi.PartitionLength.QuadPart > 8032ULL * 1024 * 1024) ? 0x0C : 0x0B;
+    if (cur == want) return;
+    sp.PartitionType = want;
+    if (DeviceIoControl(v, IOCTL_DISK_SET_PARTITION_INFO, &sp, sizeof(sp), 0,0,&n,0))
+        printf("Partition type set to %02Xh.\n", want);
+}
 #else
 #include <fcntl.h>
 #include <unistd.h>
@@ -71,7 +101,18 @@ static int VolWrite(VOL v, u64 off, const void *buf, u32 len) {
 static u64 VolSize(VOL v) { struct stat st; return fstat(v, &st) == 0 ? (u64)st.st_size : 0; }
 static u32 VolSector(VOL v) { (void)v; return 512; }
 static void VolClose(VOL v) { close(v); }
+static u32 VolHidden(VOL v) { (void)v; return 0; }
+static void VolSetType(VOL v, int fatType, u32 totalSec) { (void)v; (void)fatType; (void)totalSec; }
 #endif
+
+/* "4096", "4K", "64k", "1M" -> bytes */
+static u32 ParseSize(const char *s)
+{
+    char *e; unsigned long n = strtoul(s, &e, 0);
+    if (*e == 'k' || *e == 'K') n *= 1024;
+    else if (*e == 'm' || *e == 'M') n *= 1024 * 1024;
+    return (u32)n;
+}
 
 /* ------------------------------------------------------------------ */
 /* Layout                                                              */
@@ -121,7 +162,7 @@ int main(int argc, char **argv)
             } else if (!strncasecmp(a+1, "V:", 2)) {
                 label = a + 3;
             } else if (!strncasecmp(a+1, "A:", 2)) {
-                clusterArg = (u32)strtoul(a + 3, NULL, 0);
+                clusterArg = ParseSize(a + 3);
             } else if (!strcasecmp(a+1, "Y")) {
                 assume = 1;
             } else if (!strcasecmp(a+1, "Q")) {
@@ -150,6 +191,10 @@ int main(int argc, char **argv)
 
     if (totalSec < 128) { fprintf(stderr, "volume too small\n"); VolClose(v); return 2; }
 
+    if (clusterArg && (clusterArg < sector || clusterArg > 65536 || (clusterArg & (clusterArg - 1)))) {
+        fprintf(stderr, "invalid cluster size %u (a power of two, %u to 65536 bytes)\n", clusterArg, sector);
+        VolClose(v); return 2;
+    }
     spc = clusterArg ? (clusterArg / sector) : PickClusterSize(bytes, sector);
     if (spc == 0) spc = 1;
 
@@ -199,6 +244,35 @@ int main(int argc, char **argv)
 
     dataSec = totalSec - reserved - rootSec - numFats * fatSize;
     clusters = dataSec / spc;
+
+    /*
+     * FAT12/FAT16 hold at most 4084/65524 clusters. When the type is FAT16 or
+     * FAT12 (forced, or chosen above) and no cluster size was given, grow the
+     * cluster up to 64 KB until the count fits - a 4 GB FAT16 gets 64 KB
+     * clusters, like FORMAT /FS:FAT does on NT.
+     */
+    if (fatType != 32) {
+        u32 maxc = (fatType == 12) ? FAT12_MAXC : FAT16_MAXC;
+        while (clusters > maxc && !clusterArg && (u64)spc * 2 * sector <= 65536) {
+            spc *= 2;
+            fatSize = 1;
+            for (i = 0; i < 4; i++) {
+                u32 avail = totalSec - reserved - rootSec - numFats * fatSize;
+                u32 c = avail / spc;
+                u32 needBytes = (fatType == 12) ? ((c + 2) * 3 + 1) / 2 : (c + 2) * 2;
+                fatSize = (needBytes + sector - 1) / sector;
+            }
+            dataSec = totalSec - reserved - rootSec - numFats * fatSize;
+            clusters = dataSec / spc;
+        }
+        if (clusters > maxc) {
+            fprintf(stderr, "volume too large for FAT%d (%u clusters of %u bytes; at most %u). "
+                            "FAT16 reaches 4 GB with 64 KB clusters; use /FS:FAT32.\n",
+                    fatType, clusters, spc * sector, maxc);
+            VolClose(v);
+            return 2;
+        }
+    }
 
     /*
      * A valid FAT32 needs at least 65525 clusters (the driver, like Windows,
@@ -255,7 +329,7 @@ int main(int argc, char **argv)
         put16(b + 22, (u16)(fatType == 32 ? 0 : fatSize));
         put16(b + 24, 63);              /* sectors per track */
         put16(b + 26, 255);            /* heads */
-        put32(b + 28, 0);              /* hidden sectors */
+        put32(b + 28, VolHidden(v));   /* hidden sectors: the partition's first sector */
         if (totalSec >= 0x10000 || fatType == 32) put32(b + 32, totalSec);
         else put32(b + 32, 0);
 
@@ -378,6 +452,7 @@ int main(int argc, char **argv)
 
     off = 0; (void)off;
     free(buf);
+    VolSetType(v, fatType, totalSec);
     VolDismount(v);
     VolClose(v);
 

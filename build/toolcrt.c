@@ -72,8 +72,9 @@ unsigned long fat_strtoul(const char *s, char **end, int base)
     return v;
 }
 long fat_time(long *t){ /* seconds since 1970 from the system clock */
-    FILETIME ft; ULARGE_INTEGER u; long s;
-    GetSystemTimeAsFileTime(&ft);
+    FILETIME ft; ULARGE_INTEGER u; long s; SYSTEMTIME st;
+    /* GetSystemTimeAsFileTime is not in NT 3.1's kernel32 */
+    GetSystemTime(&st); SystemTimeToFileTime(&st, &ft);
     u.LowPart=ft.dwLowDateTime; u.HighPart=ft.dwHighDateTime;
     s=(long)((u.QuadPart - 116444736000000000ULL)/10000000ULL);
     if(t)*t=s; return s;
@@ -87,7 +88,7 @@ struct tm *fat_localtime(const time_t *t){ static struct tm r; SYSTEMTIME s; Get
 static void u64toa(unsigned __int64 v, char *b){ char t[24]; int i=0,j=0;
     if(!v){b[0]='0';b[1]=0;return;} while(v){t[i++]=(char)('0'+(int)(v%10));v/=10;} while(i)b[j++]=t[--i]; b[j]=0; }
 static void utoa10(unsigned long v, char *b){ u64toa((unsigned __int64)v,b); }
-static void utoa16(unsigned long v, char *b, int width){ char t[16]; int i=0,j=0; const char*h="0123456789abcdef";
+static void utoa16(unsigned long v, char *b, int width, int upper){ char t[16]; int i=0,j=0; const char*h=upper?"0123456789ABCDEF":"0123456789abcdef";
     if(!v)t[i++]='0'; while(v){t[i++]=h[v&15];v>>=4;} while(i<width)t[i++]='0'; while(i)b[j++]=t[--i]; b[j]=0; }
 
 /* out: buffer (sprintf) or NULL (to stdout/stderr via `std`). Returns length. */
@@ -109,7 +110,7 @@ static int vfmt(char *out, unsigned cap, DWORD std, const char *f, va_list ap)
         if(*f=='l') f++;
         if(*f=='s'){ const char*s=va_arg(ap,const char*); if(!s)s="(null)"; PUTS(s); }
         else if(*f=='u'||*f=='d'){ unsigned long v=va_arg(ap,unsigned long); utoa10(v,num); PUTS(num); }
-        else if(*f=='x'){ unsigned long v=va_arg(ap,unsigned long); utoa16(v,num,zero?width:0); PUTS(num); }
+        else if(*f=='x'||*f=='X'){ unsigned long v=va_arg(ap,unsigned long); utoa16(v,num,zero?width:0,*f=='X'); PUTS(num); }
         else if(*f=='c'){ int c=va_arg(ap,int); PUT((char)c); }
         else if(*f=='%'){ PUT('%'); }
     }

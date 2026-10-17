@@ -41,12 +41,15 @@ static HANDLE g_v;
 static int IoOpen(const char *d){ char p[16]; sprintf(p,"\\\\.\\%c:",d[0]);
     g_v=CreateFileA(p,GENERIC_READ|GENERIC_WRITE,FILE_SHARE_READ|FILE_SHARE_WRITE,0,OPEN_EXISTING,0,0);
     return g_v!=INVALID_HANDLE_VALUE; }
+/* SetFilePointer, not SetFilePointerEx: NT 3.1 - 4.0 have only the former */
 static int IoRd(u64 o,void*b,u32 n){ LARGE_INTEGER li; DWORD d; li.QuadPart=o;
-    SetFilePointerEx(g_v,li,0,FILE_BEGIN); return ReadFile(g_v,b,n,&d,0)&&d==n; }
+    SetFilePointer(g_v,(LONG)li.LowPart,&li.HighPart,FILE_BEGIN); return ReadFile(g_v,b,n,&d,0)&&d==n; }
 static int IoWr(u64 o,const void*b,u32 n){ LARGE_INTEGER li; DWORD d; li.QuadPart=o;
-    SetFilePointerEx(g_v,li,0,FILE_BEGIN); return WriteFile(g_v,b,n,&d,0)&&d==n; }
-static u64 IoSize(void){ GET_LENGTH_INFORMATION g; DWORD n;
-    return DeviceIoControl(g_v,IOCTL_DISK_GET_LENGTH_INFO,0,0,&g,sizeof(g),&n,0)?g.Length.QuadPart:0; }
+    SetFilePointer(g_v,(LONG)li.LowPart,&li.HighPart,FILE_BEGIN); return WriteFile(g_v,b,n,&d,0)&&d==n; }
+static u64 IoSize(void){ GET_LENGTH_INFORMATION g; PARTITION_INFORMATION pi; DWORD n;
+    if (DeviceIoControl(g_v,IOCTL_DISK_GET_LENGTH_INFO,0,0,&g,sizeof(g),&n,0)) return g.Length.QuadPart;
+    /* NT 3.1 - 2000 have no GET_LENGTH_INFO: the partition's length */
+    return DeviceIoControl(g_v,IOCTL_DISK_GET_PARTITION_INFO,0,0,&pi,sizeof(pi),&n,0)?pi.PartitionLength.QuadPart:0; }
 static void IoClose(void){ CloseHandle(g_v); }
 #else
 #include <fcntl.h>

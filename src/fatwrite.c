@@ -256,6 +256,19 @@ FatPagingWrite (
 
         End = StartingVbo + ByteCount;
 
+        /* A paging file is managed entirely by the Memory Manager: never
+         * zero-fill or extend valid data for it (doing so from the modified
+         * page writer froze the system). Just write the already-allocated run. */
+        if (Fcb->FcbState & FCB_STATE_PAGING_FILE) {
+
+            Status = FatNonCachedIo(Ctx, Fcb, IRP_MJ_WRITE, StartingVbo,
+                                    (ULONG)FatRoundUp(ByteCount, Vcb->SectorSize), 0);
+            if (NT_SUCCESS(Status)) {
+                Irp->IoStatus.Information = ByteCount;
+            }
+            __leave;
+        }
+
         if (End > ValidData) {
 
             if (Fcb->LazyWriteThread == KeGetCurrentThread()) {

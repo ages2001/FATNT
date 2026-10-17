@@ -161,7 +161,18 @@ FatDismountVcb (
      * of leaving the volume dismounted-but-alive we keep it mounted; the next
      * access reopens the streams and re-reads the on-disk metadata, which is
      * exactly the fresh state a remount would have produced.
+     *
+     * Only while it is still the same FAT volume, though. Formatted over (by
+     * another file system's formatter, or FORMAT), it stays dismounted: its
+     * files fail and the next open is verified, so the I/O manager mounts
+     * what is on the disk now. Going on with the old view would write FAT
+     * structures into the new file system.
      */
+    if (!FatSameVolume(Vcb)) {
+        FAT_DBG((FAT_PFX "volume %08lX was formatted over: stays dismounted\n", Vcb->SerialNumber));
+        return FALSE;
+    }
+
     Vcb->VcbState &= ~VCB_STATE_DISMOUNTED;
     Vcb->VcbState |= VCB_STATE_MOUNTED;
     Vcb->VcbState &= ~VCB_STATE_DASD_WRITTEN;
@@ -360,7 +371,11 @@ FatCommonCleanup (
             FcbAcquired = TRUE;
 
             if (FatIsDcb(Fcb)) {
+#ifdef FAT_NT31
+                FatNotifyCleanupList(Vcb, Ccb);
+#else
                 FsRtlNotifyCleanup(Vcb->NotifySync, &Vcb->DirNotifyList, Ccb);
+#endif
             } else {
                 FsRtlFastUnlockAll(&Fcb->FileLock, FileObject,
                                    IoGetRequestorProcess(Ctx->Irp), NULL);

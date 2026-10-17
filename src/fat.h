@@ -665,6 +665,7 @@ NTSTATUS FatCommonClose(PFAT_IRP_CONTEXT Ctx);
 BOOLEAN  FatTryTeardown(PFAT_VCB Vcb, ULONG InFlightReferences);
 VOID     FatDeleteVcb(PFAT_VCB Vcb);
 BOOLEAN  FatDismountVcb(PFAT_VCB Vcb);
+BOOLEAN  FatSameVolume(PFAT_VCB Vcb);
 VOID     FatUnlockVcb(PFAT_VCB Vcb);
 VOID     FatPurgeCachedFiles(PFAT_VCB Vcb);
 
@@ -677,6 +678,9 @@ NTSTATUS FatZeroFileRange(PFAT_FCB Fcb, PFILE_OBJECT FileObject, LONGLONG Start,
 
 /* fatdir.c */
 NTSTATUS FatCommonDirectoryControl(PFAT_IRP_CONTEXT Ctx);
+#ifdef FAT_NT31
+VOID     FatNotifyCleanupList(PFAT_VCB Vcb, PFAT_CCB Ccb);
+#endif
 BOOLEAN  FatNextDirEntry(PFAT_VCB Vcb, PFAT_FCB Dcb, PULONG Offset, PFAT_SCAN Scan);
 NTSTATUS FatLookupName(PFAT_VCB Vcb, PFAT_FCB Dcb, PUNICODE_STRING Name, PFAT_SCAN Scan);
 PFAT_SCAN FatAllocateScan(VOID);

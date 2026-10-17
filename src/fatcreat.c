@@ -563,11 +563,18 @@ FatCommonCreate (
             }
 
             /*
-             * Open the existing, already-sized paging file as-is: never
-             * supersede, overwrite or truncate it (the Memory Manager opens
-             * it with a don't-care disposition), and never create it here.
+             * The Memory Manager opens the paging file with FILE_SUPERSEDE.
+             * An existing paging file is opened as-is - never superseded,
+             * overwritten or truncated (it then sizes it itself) - but a
+             * missing one must still be created, or the system comes up
+             * with no paging file at all.
              */
-            CreateDisposition = FILE_OPEN;
+            if (CreateDisposition == FILE_SUPERSEDE || CreateDisposition == FILE_OVERWRITE_IF ||
+                CreateDisposition == FILE_OPEN_IF) {
+                CreateDisposition = FILE_OPEN_IF;
+            } else if (CreateDisposition == FILE_OVERWRITE) {
+                CreateDisposition = FILE_OPEN;
+            }
         }
 
         if (CreateOptions & FILE_OPEN_BY_FILE_ID) {

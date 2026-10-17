@@ -271,6 +271,14 @@ FatFsdDispatch (
         Ctx.Flags |= FAT_CTX_TOP_LEVEL;
     }
 
+#ifdef FAT_DBGPORT
+    DBGP("[F t="); DBGX(KeGetCurrentThread()); DBGP(" mj="); DBGX(Ctx.IrpSp->MajorFunction); DBGP(" mn="); DBGX(Ctx.IrpSp->MinorFunction);
+    if (Ctx.IrpSp->MajorFunction == IRP_MJ_CREATE && Ctx.IrpSp->FileObject) { DBGP(" "); DBGU(Ctx.IrpSp->FileObject->FileName); }
+    if (Ctx.IrpSp->MajorFunction == IRP_MJ_READ || Ctx.IrpSp->MajorFunction == IRP_MJ_WRITE) {
+        DBGP(" off="); DBGX(Ctx.IrpSp->Parameters.Read.ByteOffset.LowPart); DBGP(" len="); DBGX(Ctx.IrpSp->Parameters.Read.Length);
+        DBGP(" fl="); DBGX(Irp->Flags); }
+    DBGP("]\n");
+#endif
     for (;;) {
 
         Status = FatGuardedDispatch(&Ctx);
@@ -293,6 +301,9 @@ FatFsdDispatch (
         Irp->IoStatus.Information = 0;
     }
 
+#ifdef FAT_DBGPORT
+    DBGP("[F< t="); DBGX(KeGetCurrentThread()); DBGP(" mj="); DBGX(Ctx.IrpSp->MajorFunction); DBGP(" st="); DBGX(Status); DBGP("]\n");
+#endif
     if (!(Ctx.Flags & FAT_CTX_NO_COMPLETE)) {
 
         if (Status == STATUS_VERIFY_REQUIRED && Ctx.Vcb != NULL &&
