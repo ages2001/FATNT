@@ -7,7 +7,13 @@
  * and XP. Compiles for Win32 (the real tool) or POSIX (for testing against
  * a disk image).
  *
- *   fatfmt drive: [/FS:FAT|FAT32] [/V:label] [/A:size] [/Q] [/Y]
+ *   fatfmt drive: [/FS:FAT|FAT32] [/V:label] [/A:size] [/T:xx] [/Q] [/Y]
+ *   fatfmt drive: /T:xx /TYPEONLY      (only change the partition type)
+ *
+ * /T:xx gives the partition type xx (hex) instead of the one picked for the
+ * FAT type: /T:06 on a FAT32 volume makes NT 3.1 - 4.0 assign it a drive
+ * letter themselves and Disk Administrator show it as FAT rather than
+ * "Unknown" (DOS and Windows 9x would then misread it).
  */
 
 #include <stdio.h>
@@ -68,23 +74,29 @@ static u32 VolHidden(VOL v) {
 }
 /* Give the partition the type that matches the FAT just written, keeping the
    LBA (0Eh/0Ch) form when the partition already used one. */
-static void VolSetType(VOL v, int fatType, u32 totalSec) {
+static int VolSetType(VOL v, int fatType, u32 totalSec, int forced) {
     PARTITION_INFORMATION pi; SET_PARTITION_INFORMATION sp; DWORD n; u8 want, cur;
-    if (!DeviceIoControl(v, IOCTL_DISK_GET_PARTITION_INFO, 0,0,&pi,sizeof(pi),&n,0)) return;
+    if (!DeviceIoControl(v, IOCTL_DISK_GET_PARTITION_INFO, 0,0,&pi,sizeof(pi),&n,0)) return forced < 0;
     cur = pi.PartitionType;
-    if ((GetVersion() & 0x80000000) == 0 && (GetVersion() & 0xFF) < 5) {
+    if (forced >= 0) want = (u8)forced;
+    else if ((GetVersion() & 0x80000000) == 0 && (GetVersion() & 0xFF) < 5) {
         /* NT 3.1 - 4.0 letter only the partition types they recognize (01, 04,
-           06, 07): never move a volume to 0B/0C/0E there, or it loses its drive
-           letter. Only correct FAT12/FAT16 within 01/04/06. */
-        if (fatType == 32 || (cur != 0x01 && cur != 0x04 && cur != 0x06)) return;
+           06, 07): never move a volume to 0B/0C/0E there (FATNT letters those
+           itself), but a FAT12/FAT16 volume on one moves to 01/04/06, which
+           they letter and Disk Administrator shows as FAT. */
+        if (fatType == 32) return 1;
         want = (fatType == 12) ? 0x01 : (totalSec < 65536 ? 0x04 : 0x06);
     } else if (fatType == 12) want = 0x01;
     else if (fatType == 16) want = (cur == 0x0E || cur == 0x0C) ? 0x0E : (totalSec < 65536 ? 0x04 : 0x06);
     else                    want = (cur == 0x0C || cur == 0x0E || (u64)pi.PartitionLength.QuadPart > 8032ULL * 1024 * 1024) ? 0x0C : 0x0B;
-    if (cur == want) return;
+    if (cur == want) return 1;
     sp.PartitionType = want;
-    if (DeviceIoControl(v, IOCTL_DISK_SET_PARTITION_INFO, &sp, sizeof(sp), 0,0,&n,0))
-        printf("Partition type set to %02Xh.\n", want);
+    if (DeviceIoControl(v, IOCTL_DISK_SET_PARTITION_INFO, &sp, sizeof(sp), 0,0,&n,0)) {
+        printf("Partition type set to %02Xh (it applies after a restart).\n", want);
+        return 1;
+    }
+    if (forced >= 0) fprintf(stderr, "cannot set the partition type (error %lu)\n", (unsigned long)GetLastError());
+    return 0;
 }
 #else
 #include <fcntl.h>
@@ -102,7 +114,7 @@ static u64 VolSize(VOL v) { struct stat st; return fstat(v, &st) == 0 ? (u64)st.
 static u32 VolSector(VOL v) { (void)v; return 512; }
 static void VolClose(VOL v) { close(v); }
 static u32 VolHidden(VOL v) { (void)v; return 0; }
-static void VolSetType(VOL v, int fatType, u32 totalSec) { (void)v; (void)fatType; (void)totalSec; }
+static int VolSetType(VOL v, int fatType, u32 totalSec, int forced) { (void)v; (void)fatType; (void)totalSec; (void)forced; return 1; }
 #endif
 
 /* "4096", "4K", "64k", "1M" -> bytes */
@@ -139,6 +151,22 @@ static u32 PickClusterSize(u64 bytes, u32 sector)
     return spc;
 }
 
+/* A volume-label directory entry (32 bytes) at E */
+static void MakeLabelEntry(u8 *e, const char *label)
+{
+    time_t t = time(NULL);
+    struct tm *tm = localtime(&t);
+    u16 date = (u16)(((tm->tm_year - 80) << 9) | ((tm->tm_mon + 1) << 5) | tm->tm_mday);
+    u16 tod = (u16)((tm->tm_hour << 11) | (tm->tm_min << 5) | (tm->tm_sec / 2));
+    u32 n = (u32)strlen(label), k;
+    memset(e, 0, 32);
+    memset(e, ' ', 11);
+    for (k = 0; k < n && k < 11; k++) e[k] = (u8)toupper((unsigned char)label[k]);
+    e[11] = 0x08;                 /* ATTR_VOLUME_ID */
+    put16(e + 22, tod);
+    put16(e + 24, date);
+}
+
 int main(int argc, char **argv)
 {
     VOL v;
@@ -146,6 +174,8 @@ int main(int argc, char **argv)
     const char *label = NULL;
     int forceType = 0;          /* 0 auto, 12, 16, 32 */
     int assume = 0;
+    int forcedPart = -1;        /* /T:xx */
+    int typeOnly = 0;
     u32 clusterArg = 0;
     u32 sector, spc, numFats = 2, reserved, rootEnt, fatSize, totalSec, rootSec, dataSec, clusters;
     int fatType;
@@ -163,6 +193,15 @@ int main(int argc, char **argv)
                 label = a + 3;
             } else if (!strncasecmp(a+1, "A:", 2)) {
                 clusterArg = ParseSize(a + 3);
+            } else if (!strncasecmp(a+1, "T:", 2)) {
+                const char *h = a + 3;
+                long t = 0;
+                while (*h && isxdigit((unsigned char)*h) && t <= 0xFF)
+                    t = t * 16 + (isdigit((unsigned char)*h) ? *h - '0' : (toupper((unsigned char)*h) - 'A' + 10)), h++;
+                if (*h || h == a + 3 || t <= 0 || t > 0xFF) { fprintf(stderr, "invalid partition type %s\n", a + 3); return 2; }
+                forcedPart = (int)t;
+            } else if (!strcasecmp(a+1, "TYPEONLY")) {
+                typeOnly = 1;
             } else if (!strcasecmp(a+1, "Y")) {
                 assume = 1;
             } else if (!strcasecmp(a+1, "Q")) {
@@ -177,8 +216,18 @@ int main(int argc, char **argv)
     }
 
     if (drive == NULL) {
-        fprintf(stderr, "usage: fatfmt drive: [/FS:FAT|FAT32] [/V:label] [/A:size] [/Y]\n");
+        fprintf(stderr, "usage: fatfmt drive: [/FS:FAT|FAT32] [/V:label] [/A:size] [/T:xx] [/Y]\n"
+                        "       fatfmt drive: /T:xx /TYPEONLY\n");
         return 2;
+    }
+    if (typeOnly) {
+        int ok;
+        if (forcedPart < 0) { fprintf(stderr, "/TYPEONLY needs /T:xx\n"); return 2; }
+        v = VolOpen(drive);
+        if (VolBad(v)) { fprintf(stderr, "cannot open %s\n", drive); return 2; }
+        ok = VolSetType(v, 0, 0, forcedPart);
+        VolClose(v);
+        return ok ? 0 : 1;
     }
 
     v = VolOpen(drive);
@@ -308,7 +357,14 @@ int main(int argc, char **argv)
         { int c = getchar(); if (c != 'y' && c != 'Y') { VolClose(v); return 1; } }
     }
 
-    VolLock(v);
+    if (!VolLock(v)) {
+        fprintf(stderr, "Cannot lock %s: it is in use. Close the programs and files using it.\n", drive);
+        VolClose(v);
+        return 1;
+    }
+    /* Take the volume away from the file system mounted on it before writing
+       (a view kept alive would write its old FAT copies over the new ones) */
+    VolDismount(v);
 
     buf = calloc(1, 64 * 1024);
 
@@ -421,20 +477,24 @@ int main(int argc, char **argv)
             rootOff = (u64)(reserved + numFats * fatSize) * sector;
         }
 
-        /* zero it */
+        /* zero it; the first sector carries the optional volume-label entry.
+           (A volume handle takes whole sectors only, so the label is not
+           written on its own.) */
         {
             u32 left = rootBytes;
             u64 o = rootOff;
+            int first = 1;
             while (left) {
                 u32 chunk = left > 64 * 1024 ? 64 * 1024 : left;
                 memset(buf, 0, chunk);
+                if (first && label && *label) MakeLabelEntry(buf, label);
+                first = 0;
                 VolWrite(v, o, buf, chunk);
                 o += chunk; left -= chunk;
             }
         }
 
-        /* an optional volume-label entry */
-        if (label && *label) {
+        if (0) {
             u8 *e = buf;
             time_t t = time(NULL);
             struct tm *tm = localtime(&t);
@@ -452,7 +512,7 @@ int main(int argc, char **argv)
 
     off = 0; (void)off;
     free(buf);
-    VolSetType(v, fatType, totalSec);
+    VolSetType(v, fatType, totalSec, forcedPart);
     VolDismount(v);
     VolClose(v);
 

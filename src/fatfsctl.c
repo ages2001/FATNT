@@ -752,12 +752,22 @@ FatDismountVolume (
 
     __try {
 
-        if (!(Vcb->VcbState & VCB_STATE_DISMOUNTED)) {
+        /* Not after the caller has written the disk itself (a formatter that
+           dismounts at the end): the FAT copies, the FSInfo and the clean
+           bit this view would write are no longer what is on the disk */
+        if (!(Vcb->VcbState & (VCB_STATE_DISMOUNTED | VCB_STATE_DASD_WRITTEN))) {
             (VOID)FatFlushVolume(Vcb, TRUE);
         }
 
-        /* The caller's handle stays open, so the VCB cannot go away here */
+        /* The caller's handle stays open, so the VCB cannot go away here.
+           A caller that holds the lock is the only opener and is about to
+           rewrite the disk (a formatter): the volume must stay dismounted,
+           not be re-read in place - an old view kept alive would later write
+           its FAT copies into whatever is on the disk then. */
         Ccb->Flags |= CCB_FLAG_DISMOUNTED_VOLUME;
+        if ((Vcb->VcbState & VCB_STATE_LOCKED) && Vcb->LockFileObject == FileObject) {
+            Vcb->VcbState |= VCB_STATE_HARD_DISMOUNT;
+        }
         (VOID)FatDismountVcb(Vcb);
 
     } __finally {

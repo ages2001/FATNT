@@ -360,7 +360,12 @@ FatFlushVolume (
         Status = FatMarkVolumeClean(Vcb);
     }
 
-    (VOID)FatFlushDevice(Vcb);
+    /* The disk hardware cache-flush is skipped during shutdown (see
+     * FatCommonShutdown): there it can wait forever on a disk stack that is
+     * already going down. */
+    if (!FatData.ShuttingDown) {
+        (VOID)FatFlushDevice(Vcb);
+    }
 
     return Status;
 }
@@ -429,6 +434,14 @@ FatCommonShutdown (
     PFAT_VCB Vcb;
 
     UNREFERENCED_PARAMETER(Ctx);
+
+    /* From here on skip the disk cache-flush (IRP_MJ_FLUSH_BUFFERS to the disk):
+     * at shutdown the disk stack may already be stopping, and that flush waits
+     * on the disk with no timeout - the classic "Shutdown in progress" hang with
+     * the disk light stuck on. Data and metadata are written through, and the
+     * disk class driver flushes the hardware cache with its own shutdown
+     * request, so the metadata flush + clean mark below is all we need. */
+    FatData.ShuttingDown = TRUE;
 
     (VOID)ExAcquireResourceSharedLite(&FatData.Resource, TRUE);
 

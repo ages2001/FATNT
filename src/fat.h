@@ -122,6 +122,7 @@ extern FAT_PDELRES  FatpDelRes;
 extern FAT_PRELRES  FatpRelForThread;
 
 BOOLEAN FatResolveResourceApi(VOID);
+extern ULONG FatNtBuild;          /* the running NT's build number; 0 on NT 3.1 */
 
 #define ExInitializeResourceLite(r)          FatpInitRes(r)
 #define ExAcquireResourceExclusiveLite(r,w)  FatpAcqExcl((r),(w))
@@ -180,7 +181,8 @@ typedef IO_STACK_LOCATION EXTENDED_IO_STACK_LOCATION, *PEXTENDED_IO_STACK_LOCATI
 extern PIRP FatXTopLevelIrp;
 #define IoGetTopLevelIrp()          (FatXTopLevelIrp)
 #define IoSetTopLevelIrp(I)         (FatXTopLevelIrp = (PIRP)(I))
-#define IoGetRequestorProcess(Irp)  ((PEPROCESS)0)
+/* (cleanup runs in the process closing the handle: its locks go) */
+#define IoGetRequestorProcess(Irp)  IoGetCurrentProcess()
 #define IoGetDeviceToVerify(T)      ((PDEVICE_OBJECT)0)
 #define IoSetDeviceToVerify(T, D)   ((void)0)
 #endif
@@ -318,7 +320,10 @@ typedef struct _FAT_FILE_FS_FULL_SIZE_INFORMATION {
 
 #define FAT_PFX                 "[FATNT] "
 
-#if DBG || defined(FAT_DEBUG)
+#ifdef FAT_DBGPORT
+VOID __cdecl FatPortPrintf(const char *f, ...);
+#define FAT_DBG(args)           FatPortPrintf args
+#elif DBG || defined(FAT_DEBUG)
 #define FAT_DBG(args)           DbgPrint args
 #else
 #define FAT_DBG(args)
@@ -357,7 +362,12 @@ static __inline void FatDbgUni(const void *us)
 /* Limits and tags                                                     */
 /* ------------------------------------------------------------------ */
 
-#define FAT_FS_DEVICE_NAME      L"\\FatNt"
+/* "\Fat" is the name of Microsoft's FAT driver's device: NT 3.1's FAT
+   recognizer (Fat_Rec.sys) looks for it to know the FAT driver is loaded,
+   and without it would ask for the driver again and again for every new
+   FAT12/16 volume. "\FatNt" is taken when Fastfat itself runs beside FATNT. */
+#define FAT_FS_DEVICE_NAME      L"\\Fat"
+#define FAT_FS_DEVICE_NAME2     L"\\FatNt"
 #define FAT_FS_NAME             L"FAT"
 
 #define FAT_TAG                 'taFA'
@@ -372,6 +382,13 @@ static __inline void FatDbgUni(const void *us)
 #define FAT_MAP_UNIT            0x1000      /* CcMapData / CcPinRead granule */
 #define FAT_PAGE_SIZE           0x1000      /* x86 and amd64 */
 #define FAT_ZERO_CHUNK          0x10000     /* zero buffer for disk writes */
+/* Largest single transfer handed to the disk stack in one IRP. A disk miniport
+ * (atdisk/atapi/scsiport, IDENT) has a bounded MaximumTransferLength; one IRP
+ * past it faults or is rejected. Non-cached I/O (a DASD read of the whole FAT by
+ * fatchk on a huge FAT32 volume, a large file read/write) is split into chunks
+ * of this size. 1 MB matches the other drivers in this family (the SCSI port
+ * splits it to the adapter's limit); the point is to bound the single IRP. */
+#define FAT_MAX_TRANSFER        0x100000
 
 /* ------------------------------------------------------------------ */
 /* Node types                                                          */
@@ -562,6 +579,7 @@ struct _FAT_VCB {
 #define VCB_STATE_KEEP_DIRTY        0x0800  /* dirty at mount or by request */
 #define VCB_STATE_FLUSH_ON_CLOSE    0x1000  /* removable or hot-plug media */
 #define VCB_STATE_SHUTDOWN          0x2000
+#define VCB_STATE_HARD_DISMOUNT     0x4000  /* dismounted by its locker: never re-read in place */
 
 typedef struct _FAT_DATA {
     PDRIVER_OBJECT  DriverObject;
@@ -573,6 +591,7 @@ typedef struct _FAT_DATA {
     CACHE_MANAGER_CALLBACKS CacheManagerCallbacks;
     CACHE_MANAGER_CALLBACKS MetaCacheCallbacks;
     UNICODE_STRING  RegistryPath;   /* the service key, NUL-terminated */
+    BOOLEAN         ShuttingDown;   /* set in IRP_MJ_SHUTDOWN: skip the disk cache-flush */
 } FAT_DATA, *PFAT_DATA;
 
 extern FAT_DATA FatData;
@@ -648,6 +667,9 @@ typedef struct _FAT_CLOSE_ITEM {
 /* ------------------------------------------------------------------ */
 
 /* fatinit.c */
+/* fatletr.c */
+VOID     FatStartDriveLetters(VOID);
+
 NTSTATUS NTAPI DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath);
 BOOLEAN FatWriteSupportEnabled(VOID);
 

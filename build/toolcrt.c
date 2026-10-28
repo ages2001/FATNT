@@ -46,6 +46,7 @@ int tolower(int c){ return (c>='A'&&c<='Z')?c+32:c; }
 int isdigit(int c){ return c>='0'&&c<='9'; }
 int isalpha(int c){ return (c>='A'&&c<='Z')||(c>='a'&&c<='z'); }
 int isspace(int c){ return c==' '||c=='\t'||c=='\n'||c=='\r'||c=='\f'||c=='\v'; }
+int isxdigit(int c){ return isdigit(c)||(c>='a'&&c<='f')||(c>='A'&&c<='F'); }
 
 /* ---- heap (process heap) ---- */
 void *fat_malloc(unsigned n){ return HeapAlloc(GetProcessHeap(), 0, n?n:1); }

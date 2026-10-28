@@ -103,6 +103,13 @@ DriverEntry (
                             FALSE,
                             &DeviceObject);
 
+    if (Status == STATUS_OBJECT_NAME_COLLISION) {
+        /* Microsoft's Fastfat is running too (fatinst /DISABLE /KEEPFAT) */
+        RtlInitUnicodeString(&Name, FAT_FS_DEVICE_NAME2);
+        Status = IoCreateDevice(DriverObject, 0, &Name, FILE_DEVICE_DISK_FILE_SYSTEM,
+                                0, FALSE, &DeviceObject);
+    }
+
     if (!NT_SUCCESS(Status)) {
         FAT_DBG((FAT_PFX "IoCreateDevice failed %lX\n", Status));
         return Status;
@@ -147,6 +154,14 @@ DriverEntry (
     (VOID)IoRegisterShutdownNotification(DeviceObject);
 
     IoRegisterFileSystem(DeviceObject);
+
+#ifdef FAT_NT31
+    /* NT 3.1 - 4.0 give FAT32 (0Bh/0Ch) and LBA FAT16 (0Eh) partitions no
+       drive letter; Windows 2000 (build 2195) and later do */
+    if (FatNtBuild < 2195) {
+        FatStartDriveLetters();
+    }
+#endif
 
     FAT_DBG((FAT_PFX "Loaded\n"));
 

@@ -1,5 +1,21 @@
 FATNT - Changelog
 
+v1.3.0.0
+Changelog:
+- fatchk no longer crashes Windows NT 4.0 to a bugcheck on a large FAT32 partition (GitHub issue #1). The cause was in the driver: a non-cached read or write larger than the disk's maximum transfer length was handed to the disk in one IRP. FATNT now splits a non-cached transfer into pieces the disk stack accepts (1 MB each), so very large reads and writes - like fatchk scanning the whole FAT of a multi-hundred-GB volume - go through. fatchk itself was also hardened: it reads and writes the FAT in 1 MB pieces, checks every allocation, and limits directory recursion, so it no longer runs the system out of memory or overflows the stack on a huge volume.
+- Fixed Windows NT 3.1 hanging at "Shutdown in progress" with the disk light stuck on. During shutdown FATNT asked the disk to flush its hardware cache and waited for it without a timeout; on NT 3.1 that wait never returned. FAT volumes are written through, so the disk is already consistent - the shutdown flush is now skipped and the machine powers down.
+- FAT32 partitions (types 0Bh and 0Ch) and LBA FAT16 partitions (0Eh) now get drive letters on Windows NT 3.1 - 4.0, which only letter types 01h, 04h, 06h and 07h themselves. The letters are kept in the registry, so a partition keeps its letter.
+- Fixed byte-range locks being left behind when a file was closed: the next lock on the file waited forever. On NT 3.5 and later WritePrivateProfileString (and Explorer writing desktop.ini) hung on FAT volumes.
+- Fixed a hang on Windows NT 3.1 when a FAT12/FAT16 volume appeared after boot (for example right after formatting one): NT 3.1's FAT recognizer looks for the \Fat device, which FATNT now creates (\FatNt if Fastfat holds the name).
+- Fixed reformatting a mounted FAT volume: the old mount could write its cached FAT over the new file system and damage the second FAT and the root directory. A volume dismounted by the program that locked it no longer flushes anything and stays dismounted.
+- fatfmt: the volume label is written again (it was lost).
+- fatfmt: added /T:xx to set the partition type of your choice and /TYPEONLY to change only the type. fatfmt X: /T:06 /TYPEONLY makes NT 3.1 - 4.0's Disk Administrator show a FAT32 volume as FAT instead of "Unknown".
+- fatfmt: on NT 3.1 - 4.0 a FAT12/FAT16 volume formatted on a 0Bh/0Ch/0Eh partition moves to type 01h/04h/06h, which those systems letter themselves.
+- fatfmt stops if the volume cannot be locked, and dismounts it right after locking.
+- fatchk locks a mounted volume first, so it checks what is really on it (it used to read a FAT not yet written out and report a freshly filled volume as empty). With files open it checks what is on the disk so far and refuses /F; the clean-shutdown bit of a mounted volume is no longer reported.
+- Fixed the date of the ".." entry in folders of the root directory.
+- fatinst finds fatnt.sys next to itself; run from another folder (a floppy, say) it failed with error 2.
+
 v1.2.0.0
 Changelog:
 - Paging files on FAT volumes now work: the Memory Manager can create and size pagefile.sys, and an existing paging file is opened as-is, never truncated.

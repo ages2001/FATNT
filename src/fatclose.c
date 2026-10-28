@@ -168,8 +168,9 @@ FatDismountVcb (
      * what is on the disk now. Going on with the old view would write FAT
      * structures into the new file system.
      */
-    if (!FatSameVolume(Vcb)) {
-        FAT_DBG((FAT_PFX "volume %08lX was formatted over: stays dismounted\n", Vcb->SerialNumber));
+    if ((Vcb->VcbState & VCB_STATE_HARD_DISMOUNT) || !FatSameVolume(Vcb)) {
+        FAT_DBG((FAT_PFX "volume %08lX dismounted by its locker or formatted over: stays dismounted\n",
+                 Vcb->SerialNumber));
         return FALSE;
     }
 

@@ -494,7 +494,10 @@ FatQueryDirectory (
 
             } else if (Ccb->QueryState == 1) {
 
-                FatListFromFcb(Dcb->ParentDcb, &List, L"..", 2 * sizeof(WCHAR), 1);
+                /* the root keeps no times: ".." of its subdirectories shows the
+                   directory's own, as the ".." entry on the disk has them */
+                FatListFromFcb((Dcb->ParentDcb->FcbState & FCB_STATE_ROOT) ? Dcb : Dcb->ParentDcb,
+                               &List, L"..", 2 * sizeof(WCHAR), 1);
                 Ccb->QueryState = 2;
 
             } else {

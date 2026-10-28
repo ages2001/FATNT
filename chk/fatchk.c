@@ -38,9 +38,15 @@ typedef unsigned long long u64;
 #include <windows.h>
 #include <winioctl.h>
 static HANDLE g_v;
-static int IoOpen(const char *d){ char p[16]; sprintf(p,"\\\\.\\%c:",d[0]);
+static int g_online, g_locked, g_dismount;
+/* A mounted volume is locked (the file system flushes everything first); if
+   files are open the lock fails, but the flush has been done all the same. */
+static int IoOpen(const char *d){ char p[16]; DWORD n; sprintf(p,"\\\\.\\%c:",d[0]);
     g_v=CreateFileA(p,GENERIC_READ|GENERIC_WRITE,FILE_SHARE_READ|FILE_SHARE_WRITE,0,OPEN_EXISTING,0,0);
-    return g_v!=INVALID_HANDLE_VALUE; }
+    if (g_v==INVALID_HANDLE_VALUE) return 0;
+    g_online=1;
+    g_locked=DeviceIoControl(g_v,FSCTL_LOCK_VOLUME,0,0,0,0,&n,0);
+    return 1; }
 /* SetFilePointer, not SetFilePointerEx: NT 3.1 - 4.0 have only the former */
 static int IoRd(u64 o,void*b,u32 n){ LARGE_INTEGER li; DWORD d; li.QuadPart=o;
     SetFilePointer(g_v,(LONG)li.LowPart,&li.HighPart,FILE_BEGIN); return ReadFile(g_v,b,n,&d,0)&&d==n; }
@@ -50,12 +56,19 @@ static u64 IoSize(void){ GET_LENGTH_INFORMATION g; PARTITION_INFORMATION pi; DWO
     if (DeviceIoControl(g_v,IOCTL_DISK_GET_LENGTH_INFO,0,0,&g,sizeof(g),&n,0)) return g.Length.QuadPart;
     /* NT 3.1 - 2000 have no GET_LENGTH_INFO: the partition's length */
     return DeviceIoControl(g_v,IOCTL_DISK_GET_PARTITION_INFO,0,0,&pi,sizeof(pi),&n,0)?pi.PartitionLength.QuadPart:0; }
-static void IoClose(void){ CloseHandle(g_v); }
+static void IoClose(void){ DWORD n;
+    if (g_locked) {
+        /* repairs made: the file system must read the volume again */
+        if (g_dismount) DeviceIoControl(g_v,FSCTL_DISMOUNT_VOLUME,0,0,0,0,&n,0);
+        DeviceIoControl(g_v,FSCTL_UNLOCK_VOLUME,0,0,0,0,&n,0);
+    }
+    CloseHandle(g_v); }
 #else
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/stat.h>
 static int g_v;
+static int g_online, g_locked, g_dismount;
 static int IoOpen(const char *p){ g_v=open(p,O_RDWR); return g_v>=0; }
 static int IoRd(u64 o,void*b,u32 n){ return pread(g_v,b,n,(off_t)o)==(ssize_t)n; }
 static int IoWr(u64 o,const void*b,u32 n){ return pwrite(g_v,b,n,(off_t)o)==(ssize_t)n; }
@@ -176,7 +189,11 @@ static u8 *ReadChainData(u32 first, u32 *lenOut)
     u32 cap = 0, used = 0, c = first;
     u8 *buf = NULL;
     while (Valid(c)) {
-        if (used + G.ClusterSize > cap) { cap = cap ? cap*2 : G.ClusterSize*4; buf = realloc(buf, cap); }
+        if (used + G.ClusterSize > cap) {
+            u8 *nb; cap = cap ? cap*2 : G.ClusterSize*4; nb = realloc(buf, cap);
+            if (nb == NULL) { free(buf); *lenOut = used; return NULL; }  /* give up on this dir */
+            buf = nb;
+        }
         if (!IoRd(ClusterLbo(c), buf + used, G.ClusterSize)) break;
         used += G.ClusterSize;
         { u32 n = FatEnt(c); if (IsEoc(n) || !Valid(n)) break; c = n; }
@@ -186,6 +203,8 @@ static u8 *ReadChainData(u32 first, u32 *lenOut)
 }
 
 static void WalkDir(u32 firstCluster, int isFixedRoot, const char *path);
+static int g_depth;                 /* directory nesting guard (loops/corruption) */
+#define FAT_MAX_DIR_DEPTH 256
 
 static void WalkEntries(u8 *data, u32 len, const char *path)
 {
@@ -223,7 +242,14 @@ static void WalkEntries(u8 *data, u32 len, const char *path)
                 if (info.FirstCluster != 0) {
                     u32 clusters = CheckChain(info.FirstCluster, child);
                     (void)clusters;
-                    WalkDir(info.FirstCluster, 0, child);
+                    if (g_depth < FAT_MAX_DIR_DEPTH) {
+                        g_depth++;
+                        WalkDir(info.FirstCluster, 0, child);
+                        g_depth--;
+                    } else {
+                        g_problems++;
+                        printf("  %s: directory nesting too deep (possible loop), not descended\n", child);
+                    }
                 }
 
             } else {
@@ -249,6 +275,7 @@ static void WalkDir(u32 firstCluster, int isFixedRoot, const char *path)
     if (isFixedRoot) {
         len = G.RootDirSectors * g_sector;
         data = malloc(len);
+        if (data == NULL) return;
         if (!IoRd((u64)G.FirstRootSector * g_sector, data, len)) { free(data); return; }
     } else {
         data = ReadChainData(firstCluster, &len);
@@ -279,6 +306,14 @@ int main(int argc, char **argv)
 
     if (!IoOpen(drive)) { fprintf(stderr, "cannot open %s\n", drive); return 3; }
     bytes = IoSize();
+    if (g_online && !g_locked) {
+        if (g_fix) {
+            fprintf(stderr, "%s is in use (files are open): it cannot be repaired now.\n", drive);
+            IoClose();
+            return 3;
+        }
+        printf("%s is in use: checking what has been written to it so far.\n", drive);
+    }
 
     if (!IoRd(0, boot, sizeof(boot))) { fprintf(stderr, "read error\n"); IoClose(); return 3; }
 
@@ -299,14 +334,33 @@ int main(int argc, char **argv)
     default:          g_eoc = FAT32_EOC; g_mask = FAT32_MASK; g_bad = FAT32_BAD; break;
     }
 
-    /* Load the active FAT */
+    /* Load the active FAT. On a big FAT32 (a 1 TB volume with 32 KB clusters
+     * has a ~134 MB FAT) this is a large buffer, so fail cleanly if it will not
+     * allocate and read it in bounded pieces rather than one huge request. */
     g_fatbytes = G.FatSectors * g_sector;
     g_fat = malloc(g_fatbytes);
-    if (!IoRd((u64)G.ReservedSectors * g_sector, g_fat, g_fatbytes)) {
-        fprintf(stderr, "cannot read the FAT\n"); IoClose(); return 3;
+    if (g_fat == NULL) {
+        fprintf(stderr, "not enough memory for the FAT (%u bytes)\n", g_fatbytes);
+        IoClose(); return 3;
+    }
+    {
+        u64 base = (u64)G.ReservedSectors * g_sector;
+        u32 off = 0;
+        while (off < g_fatbytes) {
+            u32 chunk = g_fatbytes - off;
+            if (chunk > 0x100000) chunk = 0x100000;      /* 1 MB at a time */
+            if (!IoRd(base + off, g_fat + off, chunk)) {
+                fprintf(stderr, "cannot read the FAT\n"); IoClose(); return 3;
+            }
+            off += chunk;
+        }
     }
 
     g_owner = calloc(G.ClusterCount + 2, 1);
+    if (g_owner == NULL) {
+        fprintf(stderr, "not enough memory for %u clusters\n", G.ClusterCount);
+        IoClose(); return 3;
+    }
     g_owner[0] = g_owner[1] = 1;
 
     /* Reserved entries */
@@ -315,8 +369,8 @@ int main(int argc, char **argv)
         if (g_fix) { FatSet(0, g_mask & ~0xFF); g_fat[0] = (u8)G.Media; g_fixed++; }
     }
 
-    /* The dirty (clean-shutdown) bit */
-    if (G.FatType != FAT_TYPE_12) {
+    /* The dirty (clean-shutdown) bit: a mounted volume's is the file system's business */
+    if (G.FatType != FAT_TYPE_12 && !g_online) {
         u32 e1 = FatEnt(1);
         u32 cleanBit = (G.FatType == FAT_TYPE_16) ? 0x8000 : 0x08000000;
         if (!(e1 & cleanBit)) {
@@ -357,13 +411,21 @@ int main(int argc, char **argv)
         printf("%u of %u clusters free.\n", freec, G.ClusterCount);
     }
 
-    /* Write back */
+    /* Write back (in bounded pieces, like the read: the FAT can be ~134 MB) */
     if (g_fix && g_fatdirty) {
         u32 f;
         for (f = 0; f < G.NumberOfFats; f++) {
-            IoWr((u64)(G.ReservedSectors + f * G.FatSectors) * g_sector, g_fat, g_fatbytes);
+            u64 base = (u64)(G.ReservedSectors + f * G.FatSectors) * g_sector;
+            u32 off = 0;
+            while (off < g_fatbytes) {
+                u32 chunk = g_fatbytes - off;
+                if (chunk > 0x100000) chunk = 0x100000;      /* 1 MB at a time */
+                IoWr(base + off, g_fat + off, chunk);
+                off += chunk;
+            }
         }
         printf("Repairs written.\n");
+        g_dismount = 1;
     }
 
     IoClose();

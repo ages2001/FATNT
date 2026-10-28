@@ -15,7 +15,8 @@ boot file system all the way down to NT 3.1.
 
 ## Status
 
-**Version 1.2** - read/write, boot and paging file on Windows NT 3.1 - 4.0.
+**Version 1.3** - read/write, boot and paging file on Windows NT 3.1 - 4.0,
+FAT32 with drive letters on all of them.
 See [changelog.txt](changelog.txt) for what changed.
 
 Files and directories can be created, written, extended, truncated, renamed,
@@ -77,6 +78,10 @@ boot-time (`autochk`-style) check yet.
     files were still open on it is let go, so the new file system mounts
   - Paging files: created, sized and grown by the Memory Manager; a paging file
     in use cannot be deleted or renamed
+  - **Drive letters for FAT32 partitions on NT 3.1 - 4.0.** Those systems give
+    letters only to partition types `01`, `04`, `06` and `07`; FATNT gives the
+    FAT32 types `0B` and `0C` and the LBA FAT16 type `0E` letters itself when
+    their boot sector is FAT (see *FAT32 partitions on NT 3.1 - 4.0*)
 - **Single source tree**, built with `FAT_NT4` (and `FAT_CROSS` for the GCC
   cross build) into **one** `fatnt.sys` that loads and boots on NT 3.1, 3.5,
   3.51 and 4.0 (x86) - no per-version binary. It binds the executive-resource
@@ -134,6 +139,7 @@ arrives while the volume is busy is finished by a worker thread.
 - **src\fatstruc.c** - FCB/CCB management, internal streams, names, time conversion
 - **src\fatfast.c** - fast I/O and Cache Manager callbacks
 - **src\fatmisc.c** - device control pass-through, byte-range locks
+- **src\fatletr.c** - drive letters for `0B`/`0C`/`0E` partitions on NT 3.1 - 4.0
 - **bin\fatnt.reg** - service registration
 - **fmt\ chk\** - the tools
 - **test\** - user-mode test run on Linux
@@ -278,6 +284,11 @@ once the driver runs for real. The ones that mattered:
   `autochk` unlocks the system volume, FATNT drops its cached metadata; if the
   volume still has open handles (it always does while running) it re-reads in
   place instead of a full dismount, which NT 3.1 cannot remount cleanly.
+- **The file system device is `\Fat`.** NT 3.1's FAT recognizer (`Fat_Rec`)
+  checks for a file system device of that name before it asks for the FAT
+  driver to be loaded; with any other name it kept asking, and the first FAT
+  volume to appear after boot (a freshly formatted one, say) hung the system.
+  If `\Fat` is taken (Fastfat still loaded), FATNT uses `\FatNt`.
 - **The boot volume is loaded by file name** - the loader loads `Fastfat.sys`,
   which is why the installer's default is to stand in for that file (see
   *Why "replace" is the default*).
@@ -331,6 +342,23 @@ it needs no `msvcrt`/`crtdll` on NT 3.1, and a plain restart applies it.
 > `/DISABLE` registry method should be run inside NT on 3.1. On NT 3.5 and
 > later the hive is the standard format and can be edited offline.
 
+### FAT32 partitions on NT 3.1 - 4.0
+
+NT 3.1 - 4.0 predate FAT32: they give drive letters only to partition types
+`01`, `04`, `06` and `07`, and their Disk Administrator lists FAT32 (`0B`,
+`0C`) and LBA FAT16 (`0E`) partitions as **Unknown**. FATNT reads the boot
+sector of every such partition at startup and gives the FAT ones the next free
+drive letters (remembered in the registry, so a partition keeps its letter);
+FATNT mounts them like any other FAT volume. Disk Administrator still shows
+them as Unknown - it judges by the partition type alone - and cannot assign
+those letters.
+
+If Disk Administrator should show the volume as FAT and NT itself should give
+it its letter, give the partition type `06`: `fatfmt X: /T:06 /TYPEONLY`
+(no format; applies after a restart). FATNT and Windows 2000 and later read a
+FAT32 volume on a type `06` partition fine; DOS and Windows 9x would misread
+it, so do this only on disks that stay with NT.
+
 ### Settings
 
 With the default (replace) install the setting lives on the `Fastfat` service
@@ -346,7 +374,8 @@ Read at each mount, so a change applies to volumes mounted afterwards.
 ## Tools
 
 ```
-fatfmt drive: [/FS:FAT|FAT32] [/V:label] [/A:size] [/Y]
+fatfmt drive: [/FS:FAT|FAT32] [/V:label] [/A:size] [/T:xx] [/Y]
+fatfmt drive: /T:xx /TYPEONLY
 fatchk drive: [/F] [/V]
 ```
 
@@ -357,10 +386,15 @@ on; FAT16 clusters go up to 64 KB, so a 4 GB partition formats as FAT16 the
 way NT's own `FORMAT` does it. `fatfmt` also writes the hidden-sectors field
 and gives the partition the type that matches the new FAT (`01`, `04`, `06`;
 `0B`/`0C` for FAT32 on Windows 2000 and later - NT 3.1 - 4.0 only give drive
-letters to the older types, so there it is never moved away from them). Both
-tools run on NT 3.1 through 2000. `fatchk` checks the boot sector, the reserved FAT entries and
+letters to the older types, so there a FAT32 partition keeps its type and a
+FAT12/FAT16 volume moves to `01`/`04`/`06`). `/T:xx` sets a type of your
+choice instead, `/TYPEONLY` changes only the type. `fatfmt` locks and
+dismounts the volume before writing, so a mounted volume is formatted cleanly
+and remounted fresh. Both tools run on NT 3.1 through 2000. `fatchk` checks the boot sector, the reserved FAT entries and
 clean-shutdown bit, every cluster chain (bad links, loops, over-long chains,
 cross-links), directory sizes, lost clusters and the free count; `/F` repairs.
+A mounted volume is locked first (which writes out everything cached); if files
+are open on it, `fatchk` checks what is on the disk so far and `/F` is refused.
 
 ## Testing
 

@@ -32,6 +32,7 @@ FAT_PACQRES  FatpAcqExcl      = NULL;
 FAT_PACQRES  FatpAcqShared    = NULL;
 FAT_PDELRES  FatpDelRes       = NULL;
 FAT_PRELRES  FatpRelForThread = NULL;
+ULONG        FatNtBuild       = 0;     /* 0: NT 3.1 (it exports no NtBuildNumber) */
 
 static int FatpStrEq(const char *a, const char *b)
 {
@@ -110,6 +111,11 @@ BOOLEAN FatResolveResourceApi(VOID)
     FatpAcqShared    = (FAT_PACQRES) FatpResolve2(base, "ExAcquireResourceSharedLite",     "ExAcquireResourceShared");
     FatpDelRes       = (FAT_PDELRES) FatpResolve2(base, "ExDeleteResourceLite",            "ExDeleteResource");
     FatpRelForThread = (FAT_PRELRES) FatpResolve2(base, "ExReleaseResourceForThreadLite",  "ExReleaseResourceForThread");
+
+    {
+        PULONG Build = (PULONG)FatpFindExport(base, "NtBuildNumber");
+        FatNtBuild = (Build != NULL) ? (*Build & 0xFFFF) : 0;
+    }
 
     return (FatpInitRes && FatpAcqExcl && FatpAcqShared &&
             FatpDelRes && FatpRelForThread);

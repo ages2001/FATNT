@@ -105,11 +105,29 @@ static void DriversPath(const char *leaf, char *out, DWORD cb)
 /* Default install: FATNT replaces Fastfat.sys (original kept as .sav) */
 /* ------------------------------------------------------------------ */
 
+/* fatnt.sys next to this program, else in the current folder (the
+   installer is often run from another folder, a floppy or a CD) */
+static void SourcePath(char *Out)
+{
+    char *Slash = NULL, *P;
+    DWORD N = GetModuleFileNameA(NULL, Out, MAX_PATH);
+    if (N != 0 && N < MAX_PATH) {
+        for (P = Out; *P; P++) if (*P == '\\') Slash = P;
+    }
+    if (N == 0 || N >= MAX_PATH || Slash == NULL) {
+        lstrcpyA(Out, "fatnt.sys");
+        return;
+    }
+    lstrcpyA(Slash + 1, "fatnt.sys");
+    if (GetFileAttributesA(Out) == 0xFFFFFFFF) lstrcpyA(Out, "fatnt.sys");
+}
+
 static int ReplaceInstall(void)
 {
-    char ff[MAX_PATH], sav[MAX_PATH];
+    char ff[MAX_PATH], sav[MAX_PATH], src[MAX_PATH];
 
     LOG("replace install\r\n");
+    SourcePath(src);
 
     DriversPath("fastfat.sys", ff, sizeof(ff));
     DriversPath("fastfat.sav", sav, sizeof(sav));
@@ -128,7 +146,7 @@ static int ReplaceInstall(void)
     }
     LOG("backed up\r\n");
 
-    if (!CopyFileA("fatnt.sys", ff, FALSE)) {
+    if (!CopyFileA(src, ff, FALSE)) {
         printf("  error: could not install FATNT as %s (error %lu).\n", ff, GetLastError());
         printf("  put fatnt.sys next to fatinst.exe and run it again.\n");
         return 1;
@@ -154,7 +172,7 @@ static int DisableInstall(DWORD start, int disableFastfat)
 {
     HKEY key;
     DWORD disp;
-    char dst[MAX_PATH];
+    char dst[MAX_PATH], src[MAX_PATH];
     LONG r;
     int fastfatDone = 0;
 
@@ -180,7 +198,8 @@ static int DisableInstall(DWORD start, int disableFastfat)
     }
 
     DriversPath("fatnt.sys", dst, sizeof(dst));
-    if (dst[0] && !CopyFileA("fatnt.sys", dst, FALSE)) {
+    SourcePath(src);
+    if (dst[0] && !CopyFileA(src, dst, FALSE)) {
         printf("  warning: could not copy fatnt.sys to %s (error %lu).\n", dst, GetLastError());
         printf("  copy it there yourself, then restart.\n");
     } else if (dst[0]) {

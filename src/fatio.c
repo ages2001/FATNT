@@ -326,6 +326,12 @@ FatSyncIo (
 
     KeInitializeEvent(&Event, NotificationEvent, FALSE);
     ByteOffset.QuadPart = Offset;
+#ifdef FAT_DBGPORT
+    if (MajorFunction == IRP_MJ_WRITE) {
+        FatDbgStr("[SYNCW lbo="); FatDbgHex((ULONG)(Offset >> 9)); FatDbgStr(" len="); FatDbgHex(Length);
+        FatDbgStr(" b0="); FatDbgHex(*(PULONG)Buffer); FatDbgStr("]\n");
+    }
+#endif
 
     Irp = IoBuildSynchronousFsdRequest(MajorFunction, Device, Buffer, Length,
                                        &ByteOffset, &Event, &Iosb);
@@ -515,6 +521,12 @@ FatTransferRun (
     KEVENT Event;
     NTSTATUS Status;
 
+#ifdef FAT_DBGPORT
+    if (MajorFunction == IRP_MJ_WRITE) {
+        FatDbgStr("[RUNW lbo="); FatDbgHex((ULONG)(Lbo >> 9)); FatDbgStr(" len="); FatDbgHex(Length);
+        FatDbgStr(" pg="); FatDbgHex((MasterIrp->Flags & IRP_PAGING_IO) ? 1 : 0); FatDbgStr("]\n");
+    }
+#endif
     Irp = IoAllocateIrp(Vcb->TargetDeviceObject->StackSize, FALSE);
     if (Irp == NULL) {
         return STATUS_INSUFFICIENT_RESOURCES;
@@ -636,6 +648,12 @@ FatNonCachedIo (
         Length = (ULONG)(TransferEnd - Vbo);
         if (Length > Contiguous) {
             Length = Contiguous;
+        }
+        /* Never hand the disk stack more than it can take in one IRP: a huge
+         * non-cached transfer (fatchk reading a 100+ MB FAT) would overrun the
+         * miniport's MaximumTransferLength and crash. Split it here. */
+        if (Length > FAT_MAX_TRANSFER) {
+            Length = FAT_MAX_TRANSFER;
         }
 
         Status = FatTransferRun(Vcb, MajorFunction, Irp, Offset, Lbo, Length);

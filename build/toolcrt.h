@@ -35,7 +35,7 @@ long  fat_time(long *);
 struct tm *fat_localtime(const time_t *);
 int   fat_toupper(int);
 int   fat_stricmp(const char *, const char *);
-int   tolower(int), isdigit(int), isalpha(int), isspace(int);
+int   tolower(int), isdigit(int), isalpha(int), isspace(int), isxdigit(int);
 void *memset(void *, int, unsigned);
 void *memcpy(void *, const void *, unsigned);
 void *memmove(void *, const void *, unsigned);
